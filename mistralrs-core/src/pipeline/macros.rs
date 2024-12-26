@@ -250,7 +250,8 @@ macro_rules! get_paths_gguf {
                 info!("Using chat template file at `{p}`");
                 Some(PathBuf::from_str(p)?)
             } else {
-                panic!("Specified chat template file must end with .json");
+                // panic!("Specified chat template file must end with .json");
+                None
             }
         } else {
             if $this.model_id.is_none() {

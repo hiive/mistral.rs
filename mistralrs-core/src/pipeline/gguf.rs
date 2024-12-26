@@ -389,7 +389,7 @@ impl Loader for GGUFLoader {
             if paths.get_template_filename().is_none() && self.chat_template.is_none() {
                 get_gguf_chat_template(&model)?
             } else {
-                None
+                self.chat_template.clone()
             };
 
         let has_adapter = self.kind.is_adapted();
