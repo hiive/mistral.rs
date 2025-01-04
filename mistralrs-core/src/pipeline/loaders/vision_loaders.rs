@@ -733,6 +733,17 @@ impl VisionModelLoader for Idefics3Loader {
 
 impl IsqModelLoader for Idefics3Loader {
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
-        todo!()
+        Ok(vec![
+            Regex::new(r"lm_head\.(weight|bias)$")?,
+            // Attention
+            Regex::new(r"model.text_model.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$")?,
+            Regex::new(r"model.text_model.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$")?,
+            Regex::new(r"model.text_model.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$")?,
+            Regex::new(r"model.text_model.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$")?,
+            // MLP
+            Regex::new(r"model.text_model.layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$")?,
+            Regex::new(r"model.text_model.layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$")?,
+            Regex::new(r"model.text_model.layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$")?,
+        ])
     }
 }
