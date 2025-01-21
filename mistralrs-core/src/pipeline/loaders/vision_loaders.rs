@@ -2040,7 +2040,7 @@ impl DeviceMappedModelLoader for Idefics3Loader {
             anyhow::bail!("Expected vision AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Idefics2Config = serde_json::from_str(config)?;
+        let cfg: Idefics3Config = serde_json::from_str(config)?;
 
         let num_patches = (cfg.vision_config.image_size / cfg.vision_config.patch_size).pow(2);
         let img_seq_len = (num_patches + 1) * max_num_images;
@@ -2069,7 +2069,7 @@ impl DeviceMappedModelLoader for Idefics3Loader {
             anyhow::bail!("Expected vision AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Idefics2Config = serde_json::from_str(config)?;
+        let cfg: Idefics3Config = serde_json::from_str(config)?;
 
         let num_patches = (cfg.vision_config.image_size / cfg.vision_config.patch_size).pow(2);
         let img_seq_len = num_patches + 1;
@@ -2197,7 +2197,7 @@ impl DeviceMappedModelLoader for Idefics3Loader {
         Ok(cfg.text_config.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Idefics2Config = serde_json::from_str(config)?;
+        let cfg: Idefics3Config = serde_json::from_str(config)?;
         let cfg = &cfg.text_config;
 
         let cfg = ModelConfigMetadata {
@@ -2206,7 +2206,7 @@ impl DeviceMappedModelLoader for Idefics3Loader {
             hidden_size: cfg.hidden_size,
             num_kv_heads: cfg.num_key_value_heads,
             num_attn_heads: cfg.num_attention_heads,
-            sliding_window: cfg.sliding_window,
+            sliding_window: None,
             k_head_dim: Some(cfg.hidden_size / cfg.num_attention_heads),
             v_head_dim: Some(cfg.hidden_size / cfg.num_attention_heads),
         };
