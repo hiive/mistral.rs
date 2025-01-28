@@ -17,6 +17,7 @@ use candle_core::{
 mod metal_kernels;
 
 mod bitsandbytes;
+mod blockwise_fp8;
 mod cublaslt;
 mod dummy;
 mod fp8;
@@ -28,6 +29,7 @@ mod unquantized;
 mod utils;
 
 pub use bitsandbytes::{BnbLinear, BnbQuantParmas, BnbQuantType};
+use blockwise_fp8::blockwise_fp8_linear_b;
 pub use dummy::DummyLayer;
 pub use fp8::FP8Linear;
 pub use gguf::GgufMatMul;
@@ -36,12 +38,15 @@ pub use gptq::GptqLayer;
 pub use hqq::{HqqAxis, HqqBits, HqqConfig, HqqLayer};
 pub use imatrix::ImatrixLayerStats;
 pub use unquantized::UnquantLinear;
+pub use utils::UQFF_QUANT_TYPE_OFFSET;
 
 use candle_nn::{Linear, Module, VarBuilder};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub enum QuantMethodType {
+    #[serde(rename = "fp8")]
+    Fp8,
     #[serde(rename = "gptq")]
     Gptq,
     #[serde(rename = "unreachable")]
@@ -54,7 +59,8 @@ pub enum QuantMethodType {
 impl Display for QuantMethodType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Gptq => write!(f, "GPTQ"),
+            Self::Gptq => write!(f, "gptq"),
+            Self::Fp8 => write!(f, "fp8"),
             Self::Bitsandbytes => write!(f, "bnb"),
             Self::Unreachable => write!(f, "unreachable",),
         }
@@ -70,6 +76,9 @@ pub struct QuantizedConfig {
 
     // BNB
     pub bnb_4bit_quant_type: Option<String>,
+
+    // FP8
+    pub weight_block_size: Option<Vec<usize>>,
 
     pub quant_method: QuantMethodType,
 }
@@ -126,6 +135,13 @@ pub enum QuantMethodConfig {
         bias: Option<Tensor>,
         params: BnbQuantParmas,
         quant_ty: BnbQuantType,
+    },
+    BlockwiseFP8 {
+        weight: Tensor,
+        weight_scale_inv: Tensor,
+        bias: Option<Tensor>,
+        dequant_dtype: DType,
+        weight_block_size: Vec<usize>,
     },
 }
 
@@ -321,6 +337,30 @@ impl TryFrom<IsqType> for GgmlDType {
     }
 }
 
+impl TryFrom<GgmlDType> for IsqType {
+    type Error = candle_core::Error;
+
+    fn try_from(value: GgmlDType) -> Result<Self> {
+        match value {
+            GgmlDType::Q2K => Ok(Self::Q2K),
+            GgmlDType::Q3K => Ok(Self::Q3K),
+            GgmlDType::Q4K => Ok(Self::Q4K),
+            GgmlDType::Q5K => Ok(Self::Q5K),
+            GgmlDType::Q6K => Ok(Self::Q6K),
+            GgmlDType::Q4_0 => Ok(Self::Q4_0),
+            GgmlDType::Q4_1 => Ok(Self::Q4_1),
+            GgmlDType::Q5_0 => Ok(Self::Q5_0),
+            GgmlDType::Q5_1 => Ok(Self::Q5_1),
+            GgmlDType::Q8_0 => Ok(Self::Q8_0),
+            GgmlDType::Q8_1 => Ok(Self::Q8_1),
+            GgmlDType::Q8K => Ok(Self::Q8K),
+            GgmlDType::BF16 | GgmlDType::F32 | GgmlDType::F16 => {
+                candle_core::bail!("Expected valid GGML ISQ type.")
+            }
+        }
+    }
+}
+
 pub enum QuantizedSerdeType {
     Gguf = 0,
     Unquant = 1,
@@ -442,6 +482,7 @@ pub fn linear_no_bias(
     let layer = if let Some(quant_conf) = &config {
         match quant_conf.quant_method {
             QuantMethodType::Gptq => gptq_linear(in_dim, out_dim, quant_conf, vb)?,
+            QuantMethodType::Fp8 => blockwise_fp8_linear_b(in_dim, out_dim, quant_conf, false, vb)?,
             QuantMethodType::Bitsandbytes => {
                 Arc::new(BnbLinear::linear_b(in_dim, out_dim, false, vb)?) as Arc<_>
             }
@@ -471,6 +512,7 @@ pub fn linear(
     let layer = if let Some(quant_conf) = &config {
         match quant_conf.quant_method {
             QuantMethodType::Gptq => gptq_linear(in_dim, out_dim, quant_conf, vb)?,
+            QuantMethodType::Fp8 => blockwise_fp8_linear_b(in_dim, out_dim, quant_conf, true, vb)?,
             QuantMethodType::Bitsandbytes => {
                 Arc::new(BnbLinear::linear_b(in_dim, out_dim, true, vb)?) as Arc<_>
             }

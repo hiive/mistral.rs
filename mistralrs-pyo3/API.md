@@ -25,6 +25,7 @@ If you do not specify the architecture, an attempt will be made to use the model
 - `Starcoder2`
 - `Phi3_5MoE`
 - `DeepseekV2`
+- `DeepseekV3`
 
 ### ISQ Organization
 - `Default`
@@ -38,6 +39,7 @@ If you do not specify the architecture, an attempt will be made to use the model
 - `VLlama`
 - `Qwen2VL`
 - `Idefics3`
+- `MiniCpmO`
 
 ### Architecture for diffusion models
 - `Flux`

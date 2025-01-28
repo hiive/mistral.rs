@@ -31,6 +31,20 @@ Please submit requests for new models [here](https://github.com/EricLBuehler/mis
 - Check out UQFF for prequantized models of various methods!
     - Models can be found [here](https://huggingface.co/collections/EricB/uqff-670e4a49d56ecdd3f7f0fd4c).
 
+- 🐋🐋🐋 Run the Deepseek R1/V3 model: [documentation](docs/DEEPSEEKV3.md)
+
+    ```
+    ./mistralrs-server -i --isq Q4K plain -m deepseek-ai/DeepSeek-R1
+    ```
+
+- 🐋🐋🐋 Run the Deepseek R1 [distillations](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) out of the box
+
+    ```
+    ./mistralrs-server -i --isq Q4K plain -m deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+    ./mistralrs-server -i --isq Q4K plain -m deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+    ./mistralrs-server -i --isq Q4K plain -m deepseek-ai/DeepSeek-R1-Distill-Qwen-32B
+    ```
+
 - 🦙📷 Run the **Llama 3.2 Vision** Model: [documentation and guide here](docs/VLLAMA.md)
 
     <img src="https://www.nhmagazine.com/content/uploads/2019/05/mtwashingtonFranconia-2-19-18-108-Edit-Edit.jpg" alt="Mount Washington" width = "400" height = "267">
@@ -40,22 +54,16 @@ Please submit requests for new models [here](https://github.com/EricLBuehler/mis
     ./mistralrs-server -i vision-plain -m lamm-mit/Cephalo-Llama-3.2-11B-Vision-Instruct-128k -a vllama
     ```
 
-- 🌟📷 Run the **Qwen2-VL** Model: [documentation and guide here](docs/QWEN2VL.md)
+- 🌟📷 Run the **MiniCPM-O 2.6** Model: [documentation and guide here](docs/MINICPMO_2_6.md)
 
     ```
-    ./mistralrs-server -i vision-plain -m Qwen/Qwen2-VL-2B-Instruct -a qwen2vl
+    ./mistralrs-server -i vision-plain -m openbmb/MiniCPM-o-2_6 -a minicpmo
     ```
 
 - 🤗📷 Run the **Smol VLM** Model: [documentation and guide here](docs/IDEFICS3.md)
 
     ```
     ./mistralrs-server -i vision-plain -m HuggingFaceTB/SmolVLM-Instruct -a idefics3
-    ```
-
-- 🐋🐋 Run the Deepseek V2 model: [documentation](docs/DEEPSEEKV2.md)
-
-    ```
-    ./mistralrs-server -i --isq Q4K plain -m deepseek-ai/DeepSeek-V2-Lite
     ```
 
 - φ³ Run the new Phi 3.5/3.1/3 model with 128K context window
@@ -138,7 +146,7 @@ This is a demo of interactive mode with streaming running Phi 3 128k mini with q
 
 https://github.com/EricLBuehler/mistral.rs/assets/65165915/09d9a30f-1e22-4b9a-9006-4ec6ebc6473c
 
-## Support matrix
+## Architecture Support matrix
 
 > Note: See [supported models](#supported-models) for more information
 
@@ -162,6 +170,8 @@ https://github.com/EricLBuehler/mistral.rs/assets/65165915/09d9a30f-1e22-4b9a-90
 |Qwen2-VL|✅| |✅| |
 |Idefics 3|✅| |✅|✅|
 |DeepseekV2|✅| |✅| |
+|DeepseekV3|✅| |✅| |
+|MinCPM-O 2.6|✅| |✅| |
 
 ## APIs and Integrations
 
@@ -417,6 +427,7 @@ If you do not specify the architecture, an attempt will be made to use the model
 - `gemma2`
 - `starcoder2`
 - `deepseekv2`
+- `deepseekv3`
 
 ### Architecture for vision models
 
@@ -429,6 +440,7 @@ If you do not specify the architecture, an attempt will be made to use the model
 - `vllama`
 - `qwen2vl`
 - `idefics3`
+- `minicpmo`
 
 ### Supported GGUF architectures
 
@@ -527,6 +539,8 @@ Please submit more benchmarks via raising an issue!
 |Qwen2-VL| | |✅|
 |Idefics 3| | |✅|
 |Deepseek V2| | |✅|
+|Deepseek V3| | |✅|
+|MiniCPM-O 2.6| | |✅|
 
 **Device mapping support**
 |Model category|Supported|
@@ -556,6 +570,8 @@ Please submit more benchmarks via raising an issue!
 |Qwen2-VL| | | |
 |Idefics 3| | | |
 |Deepseek V2| | | |
+|Deepseek V3| | | |
+|MiniCPM-O 2.6| | | |
 
 **AnyMoE support**
 |Model|AnyMoE|
@@ -578,6 +594,8 @@ Please submit more benchmarks via raising an issue!
 |Qwen2-VL| |
 |Idefics 3|✅|
 |Deepseek V2| |
+|Deepseek V3| |
+|MiniCPM-O 2.6| |
 
 
 ### Using derivative model

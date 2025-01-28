@@ -4,9 +4,9 @@ use super::isq::UqffFullSer;
 use super::{
     get_model_paths, get_xlora_paths, AdapterActivationMixin, AnyMoePipelineMixin, CacheManager,
     CacheManagerMixin, EitherCache, ForwardInputsResult, GeneralMetadata, IsqPipelineMixin, Loader,
-    MetadataMixin, ModelCategory, ModelKind, ModelPaths, PreProcessingMixin, Processor,
-    Qwen2VLLoader, TokenSource, VLlamaLoader, VisionModel, VisionModelLoader, VisionPromptPrefixer,
-    XLoraPaths,
+    MetadataMixin, MiniCpmOLoader, ModelCategory, ModelKind, ModelPaths, PreProcessingMixin,
+    Processor, Qwen2VLLoader, TokenSource, VLlamaLoader, VisionModel, VisionModelLoader,
+    VisionPromptPrefixer, XLoraPaths,
 };
 use super::{
     Idefics2Loader, Idefics3Loader, LLaVALoader, LLaVANextLoader, Phi3VLoader, VisionLoaderType,
@@ -14,7 +14,6 @@ use super::{
 use crate::device_map::{self, DeviceMapper};
 use crate::paged_attention::{calculate_cache_config, AttentionImplementation, CacheEngine};
 use crate::pipeline::chat_template::{calculate_eos_tokens, GenerationConfig};
-use crate::pipeline::isq::UQFF_RESIDUAL_SAFETENSORS;
 use crate::pipeline::llg::build_tok_env;
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::text_models_inputs_processor::make_prompt_chunk;
@@ -32,13 +31,14 @@ use crate::{
     AnyMoeExpertType, DeviceMapSetting, Ordering, PagedAttentionConfig, Pipeline, Topology,
     TryIntoDType,
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use candle_core::{Device, Tensor, Var};
 use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
-use mistralrs_quant::IsqType;
+use mistralrs_quant::{GgufMatMul, HqqLayer, IsqType, QuantizedSerdeType};
 use rand_isaac::Isaac64Rng;
 use regex_automata::meta::Regex;
 use std::any::Any;
+use std::borrow::Cow;
 use std::fs;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -99,7 +99,7 @@ pub struct VisionLoaderBuilder {
 /// Config specific to loading a vision model.
 pub struct VisionSpecificConfig {
     pub use_flash_attn: bool,
-    pub prompt_batchsize: Option<NonZeroUsize>,
+    pub prompt_chunksize: Option<NonZeroUsize>,
     pub topology: Option<Topology>,
     pub write_uqff: Option<PathBuf>,
     pub from_uqff: Option<PathBuf>,
@@ -132,6 +132,7 @@ impl VisionLoaderBuilder {
             VisionLoaderType::VLlama => Box::new(VLlamaLoader),
             VisionLoaderType::Qwen2VL => Box::new(Qwen2VLLoader),
             VisionLoaderType::Idefics3 => Box::new(Idefics3Loader),
+            VisionLoaderType::MiniCpmO => Box::new(MiniCpmOLoader),
         };
         Box::new(VisionLoader {
             inner: loader,
@@ -218,38 +219,46 @@ impl Loader for VisionLoader {
             // Match logic below where UQFF has priority
             let (layer_sizes_in_bytes, non_mapped_size_in_bytes, total_model_size_in_bytes) =
                 if let Some(serialized) = &*self.from_uqff.read().unwrap() {
-                    let parent = serialized
-                        .parent()
-                        .context("Target UQFF path must have a filename!")?;
-                    let residual = parent.join(UQFF_RESIDUAL_SAFETENSORS);
-
-                    let ser_total_size = {
+                    let weight_pack_factor = {
                         let ser_artifacts = unsafe {
                             candle_core::safetensors::MmapedSafetensors::new(serialized)?
                         };
-                        ser_artifacts
-                            .tensors()
-                            .iter()
-                            .map(|(_, t)| t.data().len())
-                            .sum::<usize>()
-                    };
-                    let res_total_size = {
-                        let res_artifacts =
-                            unsafe { candle_core::safetensors::MmapedSafetensors::new(residual)? };
-                        res_artifacts
-                            .tensors()
-                            .iter()
-                            .map(|(_, t)| t.data().len())
-                            .sum::<usize>()
-                    };
-                    let size_per_layer = ser_total_size / self.inner.num_layers(&config)?;
+                        let mut total_pack_factors = 0;
+                        let total_tensors = ser_artifacts.tensors().len();
+                        for (_, artifact) in ser_artifacts.tensors() {
+                            let artifact = artifact.data();
+                            // NOTE(EricLBuehler): isq type is ALWAYS byte 4 (5th) of the tensor.
+                            let isq_type = artifact[mistralrs_quant::UQFF_QUANT_TYPE_OFFSET];
+                            let pack_factor = match QuantizedSerdeType::try_from(isq_type as usize)?
+                            {
+                                QuantizedSerdeType::Hqq => {
+                                    HqqLayer::get_isq_type_from_uqff(Cow::Borrowed(artifact))?
+                                        .pack_factor(dtype)
+                                }
+                                QuantizedSerdeType::Gguf => {
+                                    GgufMatMul::get_isq_type_from_uqff(Cow::Borrowed(artifact))?
+                                        .pack_factor(dtype)
+                                }
+                                QuantizedSerdeType::Fp8 => IsqType::F8E4M3.pack_factor(dtype),
+                                QuantizedSerdeType::Unquant => 1,
+                            };
+                            total_pack_factors += pack_factor;
+                        }
 
-                    // This is not completely correct but hopefully close enough.
-                    // For example, the norms are not necessarily correctly done.
+                        total_pack_factors / total_tensors
+                    };
+
+                    let layer_sizes_in_bytes =
+                        self.inner
+                            .layer_sizes_in_bytes(&config, dtype, weight_pack_factor)?;
+                    let non_mapped_size_in_bytes =
+                        self.inner
+                            .non_mapped_size_in_bytes(&config, dtype, weight_pack_factor)?;
+                    let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
                     (
-                        vec![size_per_layer; self.inner.num_layers(&config)?],
-                        res_total_size,
-                        ser_total_size + res_total_size,
+                        layer_sizes_in_bytes,
+                        non_mapped_size_in_bytes,
+                        layer_sizes_sum + non_mapped_size_in_bytes,
                     )
                 } else if let Some(isq) = in_situ_quant {
                     let weight_pack_factor = isq.pack_factor(dtype);
@@ -278,6 +287,7 @@ impl Loader for VisionLoader {
                     )
                 };
 
+            // NOTE: Vision models don't support prompt chunking yet, so just using max seq len
             let new = self.inner.get_device_layers(
                 &config,
                 self.inner.num_layers(&config)?,
@@ -287,16 +297,12 @@ impl Loader for VisionLoader {
                 &devices,
                 dtype,
                 &params,
+                params.max_seq_len(),
                 paged_attn_config.as_ref(),
             )?;
             mapper = DeviceMapSetting::Map(new);
         }
 
-        info!(
-            "Model config: {:?}",
-            self.inner
-                .get_config_repr(&config, self.config.use_flash_attn)?
-        );
         let pipeline_mapper = mapper.into_mapper(
             self.inner.get_total_device_mapping_num_layers(&config)?,
             device,
@@ -321,6 +327,12 @@ impl Loader for VisionLoader {
             warn!("Device mapping contains a mix of GPU and CPU. There is no CPU support for PagedAttention, disabling PagedAttention.");
             paged_attn_config = None;
         }
+
+        info!(
+            "Model config: {:?}",
+            self.inner
+                .get_config_repr(&config, self.config.use_flash_attn)?
+        );
 
         let mut loading_isq = in_situ_quant.is_some() || self.config.from_uqff.is_some();
         if let Some(ref topology) = self.config.topology {
@@ -440,7 +452,6 @@ impl Loader for VisionLoader {
                     &inputs.input,
                     None, // NOTE: We ONLY calibrate the text bits of these models!!
                     &inputs.positions,
-                    inputs.positions_kernel,
                     inputs.context_lens,
                     inputs.position_ids,
                     model.default_model_specific_args(&inputs.input),
@@ -557,7 +568,7 @@ impl Loader for VisionLoader {
                 sliding_window,
                 cache_config,
                 cache_engine,
-                prompt_batchsize: self.config.prompt_batchsize,
+                prompt_chunksize: self.config.prompt_chunksize,
                 model_metadata: Some(model_metadata),
             }),
             processor,
@@ -696,7 +707,6 @@ impl Pipeline for VisionPipeline {
         let ModelInputs {
             input_ids,
             seqlen_offsets,
-            seqlen_offsets_kernel,
             context_lens,
             position_ids,
             pixel_values,
@@ -725,7 +735,6 @@ impl Pipeline for VisionPipeline {
                 &input_ids,
                 pixel_values,
                 &seqlen_offsets,
-                seqlen_offsets_kernel,
                 context_lens,
                 position_ids,
                 model_specific_args,
@@ -738,7 +747,6 @@ impl Pipeline for VisionPipeline {
             &input_ids,
             pixel_values,
             &seqlen_offsets,
-            seqlen_offsets_kernel,
             context_lens,
             position_ids,
             model_specific_args,

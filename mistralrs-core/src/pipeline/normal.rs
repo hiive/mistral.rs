@@ -1,4 +1,5 @@
 use super::cache_manager::{FullCacheManager, NormalCacheManager};
+use super::inputs_processor::DEFAULT_PROMPT_CHUNK_SIZE;
 use super::isq::ImatrixDataSource;
 use super::llg::build_tok_env;
 use super::{
@@ -12,9 +13,9 @@ use super::{
     PreProcessingMixin,
 };
 use super::{
-    AutoLoader, DeepSeekV2Loader, Gemma2Loader, GemmaLoader, LlamaLoader, MistralLoader,
-    MixtralLoader, NormalLoaderType, Phi2Loader, Phi3Loader, Phi3_5MoELoader, Qwen2Loader,
-    Starcoder2Loader,
+    AutoLoader, DeepSeekV2Loader, DeepSeekV3Loader, Gemma2Loader, GemmaLoader, LlamaLoader,
+    MistralLoader, MixtralLoader, NormalLoaderType, Phi2Loader, Phi3Loader, Phi3_5MoELoader,
+    Qwen2Loader, Starcoder2Loader,
 };
 use crate::amoe::AnyMoeExpertType;
 use crate::device_map::{self, DeviceMapper};
@@ -22,7 +23,7 @@ use crate::lora::Ordering;
 use crate::paged_attention::{calculate_cache_config, AttentionImplementation, CacheEngine};
 use crate::pipeline::chat_template::{calculate_eos_tokens, GenerationConfig};
 use crate::pipeline::get_chat_template;
-use crate::pipeline::isq::{UqffFullSer, UQFF_RESIDUAL_SAFETENSORS};
+use crate::pipeline::isq::UqffFullSer;
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::text_models_inputs_processor::make_prompt_chunk;
 use crate::pipeline::{ChatTemplate, LocalModelPaths};
@@ -37,15 +38,16 @@ use crate::{
     normal_model_loader, xlora_model_loader, DeviceMapSetting, PagedAttentionConfig, Pipeline,
     Topology, TryIntoDType,
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use candle_core::{Device, Tensor, Var};
 use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
-use mistralrs_quant::IsqType;
+use mistralrs_quant::{GgufMatMul, HqqLayer, IsqType, QuantizedSerdeType};
 use rand_isaac::Isaac64Rng;
 use regex_automata::meta::Regex;
 use std::any::Any;
+use std::borrow::Cow;
 use std::fs;
-use std::num::NonZeroUsize;
+use std::num::{NonZero, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
@@ -108,7 +110,7 @@ pub struct NormalLoaderBuilder {
 /// Config specific to loading a normal model.
 pub struct NormalSpecificConfig {
     pub use_flash_attn: bool,
-    pub prompt_batchsize: Option<NonZeroUsize>,
+    pub prompt_chunksize: Option<NonZeroUsize>,
     pub topology: Option<Topology>,
     pub organization: IsqOrganization,
     pub write_uqff: Option<PathBuf>,
@@ -204,6 +206,7 @@ impl NormalLoaderBuilder {
             Some(NormalLoaderType::Starcoder2) => Box::new(Starcoder2Loader),
             Some(NormalLoaderType::Phi3_5MoE) => Box::new(Phi3_5MoELoader),
             Some(NormalLoaderType::DeepSeekV2) => Box::new(DeepSeekV2Loader),
+            Some(NormalLoaderType::DeepSeekV3) => Box::new(DeepSeekV3Loader),
             None => Box::new(AutoLoader),
         };
         Ok(Box::new(NormalLoader {
@@ -279,6 +282,15 @@ impl Loader for NormalLoader {
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let config = std::fs::read_to_string(paths.get_config_filename())?;
 
+        // Apply default prompt size here
+        let prompt_chunksize = self
+            .config
+            .prompt_chunksize
+            .unwrap_or(DEFAULT_PROMPT_CHUNK_SIZE.try_into().unwrap())
+            .get();
+
+        info!("Prompt chunk size is {prompt_chunksize}.",);
+
         // If auto, convert to Map
         if let DeviceMapSetting::Auto(params) = mapper.clone() {
             let devices = device_map::get_all_similar_devices(device)?;
@@ -289,38 +301,46 @@ impl Loader for NormalLoader {
             // Match logic below where UQFF has priority
             let (layer_sizes_in_bytes, non_mapped_size_in_bytes, total_model_size_in_bytes) =
                 if let Some(serialized) = &*self.from_uqff.read().unwrap() {
-                    let parent = serialized
-                        .parent()
-                        .context("Target UQFF path must have a filename!")?;
-                    let residual = parent.join(UQFF_RESIDUAL_SAFETENSORS);
-
-                    let ser_total_size = {
+                    let weight_pack_factor = {
                         let ser_artifacts = unsafe {
                             candle_core::safetensors::MmapedSafetensors::new(serialized)?
                         };
-                        ser_artifacts
-                            .tensors()
-                            .iter()
-                            .map(|(_, t)| t.data().len())
-                            .sum::<usize>()
-                    };
-                    let res_total_size = {
-                        let res_artifacts =
-                            unsafe { candle_core::safetensors::MmapedSafetensors::new(residual)? };
-                        res_artifacts
-                            .tensors()
-                            .iter()
-                            .map(|(_, t)| t.data().len())
-                            .sum::<usize>()
-                    };
-                    let size_per_layer = ser_total_size / self.inner.num_layers(&config)?;
+                        let mut total_pack_factors = 0;
+                        let total_tensors = ser_artifacts.tensors().len();
+                        for (_, artifact) in ser_artifacts.tensors() {
+                            let artifact = artifact.data();
+                            // NOTE(EricLBuehler): isq type is ALWAYS byte 4 (5th) of the tensor.
+                            let isq_type = artifact[mistralrs_quant::UQFF_QUANT_TYPE_OFFSET];
+                            let pack_factor = match QuantizedSerdeType::try_from(isq_type as usize)?
+                            {
+                                QuantizedSerdeType::Hqq => {
+                                    HqqLayer::get_isq_type_from_uqff(Cow::Borrowed(artifact))?
+                                        .pack_factor(dtype)
+                                }
+                                QuantizedSerdeType::Gguf => {
+                                    GgufMatMul::get_isq_type_from_uqff(Cow::Borrowed(artifact))?
+                                        .pack_factor(dtype)
+                                }
+                                QuantizedSerdeType::Fp8 => IsqType::F8E4M3.pack_factor(dtype),
+                                QuantizedSerdeType::Unquant => 1,
+                            };
+                            total_pack_factors += pack_factor;
+                        }
 
-                    // This is not completely correct but hopefully close enough.
-                    // For example, the norms are not necessarily correctly done.
+                        total_pack_factors / total_tensors
+                    };
+
+                    let layer_sizes_in_bytes =
+                        self.inner
+                            .layer_sizes_in_bytes(&config, dtype, weight_pack_factor)?;
+                    let non_mapped_size_in_bytes =
+                        self.inner
+                            .non_mapped_size_in_bytes(&config, dtype, weight_pack_factor)?;
+                    let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
                     (
-                        vec![size_per_layer; self.inner.num_layers(&config)?],
-                        res_total_size,
-                        ser_total_size,
+                        layer_sizes_in_bytes,
+                        non_mapped_size_in_bytes,
+                        layer_sizes_sum + non_mapped_size_in_bytes,
                     )
                 } else if let Some(isq) = in_situ_quant {
                     let weight_pack_factor = isq.pack_factor(dtype);
@@ -358,6 +378,7 @@ impl Loader for NormalLoader {
                 &devices,
                 dtype,
                 &params,
+                prompt_chunksize,
                 paged_attn_config.as_ref(),
             )?;
             mapper = DeviceMapSetting::Map(new);
@@ -535,7 +556,6 @@ impl Loader for NormalLoader {
                 let _ = model.forward(
                     &inputs.input,
                     &inputs.positions,
-                    inputs.positions_kernel,
                     inputs.context_lens,
                     inputs.position_ids,
                     None,
@@ -665,7 +685,7 @@ impl Loader for NormalLoader {
                 sliding_window,
                 cache_config,
                 cache_engine,
-                prompt_batchsize: self.config.prompt_batchsize,
+                prompt_chunksize: Some(NonZero::new(prompt_chunksize).unwrap()),
                 model_metadata: Some(model_metadata),
             }),
             topology: self.config.topology.clone(),
@@ -810,8 +830,6 @@ impl Pipeline for NormalPipeline {
             input_ids_full,
             seqlen_offsets,
             seqlen_offsets_full,
-            seqlen_offsets_kernel,
-            seqlen_offsets_kernel_full,
             context_lens,
             position_ids,
             mut paged_attn_meta,
@@ -838,7 +856,6 @@ impl Pipeline for NormalPipeline {
             false => self.model.forward(
                 &input_ids,
                 &seqlen_offsets,
-                seqlen_offsets_kernel,
                 context_lens,
                 position_ids,
                 paged_attn_meta,
@@ -849,8 +866,6 @@ impl Pipeline for NormalPipeline {
                 input_ids_full.as_ref().unwrap_or(&input_ids),
                 &seqlen_offsets,
                 seqlen_offsets_full.as_ref().unwrap_or(&seqlen_offsets),
-                seqlen_offsets_kernel.clone(),
-                seqlen_offsets_kernel_full.unwrap_or(seqlen_offsets_kernel),
                 self.no_kv_cache,
                 &self.non_granular_state,
                 context_lens,
@@ -864,7 +879,6 @@ impl Pipeline for NormalPipeline {
             false => self.model.forward(
                 &input_ids,
                 &seqlen_offsets,
-                seqlen_offsets_kernel,
                 context_lens,
                 position_ids,
                 paged_attn_meta,
@@ -875,8 +889,6 @@ impl Pipeline for NormalPipeline {
                 input_ids_full.as_ref().unwrap_or(&input_ids),
                 &seqlen_offsets,
                 seqlen_offsets_full.as_ref().unwrap_or(&seqlen_offsets),
-                seqlen_offsets_kernel.clone(),
-                seqlen_offsets_kernel_full.unwrap_or(seqlen_offsets_kernel),
                 self.no_kv_cache,
                 &self.non_granular_state,
                 context_lens,

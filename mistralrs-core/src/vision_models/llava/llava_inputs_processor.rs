@@ -87,7 +87,7 @@ impl InputsProcessor for LLaVAInputProcessor {
         return_raw_logits: bool,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<PagedAttentionMeta<'_>>,
-        prompt_batchsize: Option<NonZeroUsize>,
+        prompt_chunksize: Option<NonZeroUsize>,
         mapper: Option<&dyn DeviceMapper>,
     ) -> Box<dyn Iterator<Item = anyhow::Result<InputProcessorOutput>>> {
         if is_xlora {
@@ -101,8 +101,8 @@ impl InputsProcessor for LLaVAInputProcessor {
             ))));
         }
         // TODO(EricLBuehler): support this? Would require some handling of image tokens.
-        if prompt_batchsize.is_some() {
-            warn!("`prompt_batchsize` is set. Idefics 2 does not support prompt batching.");
+        if prompt_chunksize.is_some() {
+            warn!("`prompt_chunksize` is set. Idefics 2 does not support prompt batching.");
         }
         let Some(tokenizer) = tokenizer else {
             return Box::new(std::iter::once(Err(anyhow::Error::msg(
@@ -138,6 +138,9 @@ impl InputsProcessor for LLaVAInputProcessor {
                     video_grid_thw: _,
                     rows: _,
                     cols: _,
+                    pixel_values_list: _,
+                    tgt_sizes: _,
+                    image_sizes_all: _,
                 } = self
                     .preprocess(
                         imgs.clone(),
@@ -182,8 +185,6 @@ impl InputsProcessor for LLaVAInputProcessor {
                             input_ids_full: _,
                             seqlen_offsets,
                             seqlen_offsets_full: _,
-                            seqlen_offsets_kernel,
-                            seqlen_offsets_kernel_full: _,
                             context_lens,
                             position_ids,
                             paged_attn_meta,
@@ -196,7 +197,6 @@ impl InputsProcessor for LLaVAInputProcessor {
                         let inputs: Box<dyn Any> = Box::new(ModelInputs {
                             input_ids,
                             seqlen_offsets,
-                            seqlen_offsets_kernel,
                             context_lens,
                             position_ids,
                             pixel_values: None,
@@ -308,7 +308,6 @@ impl InputsProcessor for LLaVAInputProcessor {
                     text_models_inputs_processor::InputMetadata {
                         input,
                         positions,
-                        positions_kernel,
                         context_lens,
                         position_ids,
                         paged_attn_meta,
@@ -319,7 +318,6 @@ impl InputsProcessor for LLaVAInputProcessor {
             let inputs: Box<dyn Any> = Box::new(ModelInputs {
                 input_ids: input,
                 seqlen_offsets: positions,
-                seqlen_offsets_kernel: positions_kernel,
                 context_lens,
                 position_ids,
                 pixel_values: pixel_values.clone(),
@@ -401,6 +399,9 @@ impl ImagePreProcessor for LLaVAInputProcessor {
             video_grid_thw: None,
             rows: None,
             cols: None,
+            pixel_values_list: None,
+            tgt_sizes: None,
+            image_sizes_all: None,
         })
     }
 }

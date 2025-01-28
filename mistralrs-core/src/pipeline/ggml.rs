@@ -13,6 +13,7 @@ use crate::device_map::DeviceMapper;
 use crate::lora::Ordering;
 use crate::pipeline::chat_template::{calculate_eos_tokens, GenerationConfig};
 use crate::pipeline::get_chat_template;
+use crate::pipeline::inputs_processor::DEFAULT_PROMPT_CHUNK_SIZE;
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::{ChatTemplate, LocalModelPaths};
 use crate::prefix_cacher_v2::PrefixCacheManagerV2;
@@ -37,7 +38,7 @@ use mistralrs_quant::IsqType;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
 use std::fs;
-use std::num::NonZeroUsize;
+use std::num::{NonZero, NonZeroUsize};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -79,7 +80,7 @@ pub struct GGMLLoader {
 /// Config for a GGML loader.
 pub struct GGMLSpecificConfig {
     pub gqa: usize,
-    pub prompt_batchsize: Option<NonZeroUsize>,
+    pub prompt_chunksize: Option<NonZeroUsize>,
     pub topology: Option<Topology>,
 }
 
@@ -262,6 +263,15 @@ impl Loader for GGMLLoader {
             paged_attn_config = None;
         }
 
+        // Apply default prompt size here
+        let prompt_chunksize = self
+            .config
+            .prompt_chunksize
+            .unwrap_or(DEFAULT_PROMPT_CHUNK_SIZE.try_into().unwrap())
+            .get();
+
+        info!("Prompt chunk size is {prompt_chunksize}.",);
+
         info!(
             "Loading model `{}` on {}.",
             self.get_id(),
@@ -378,7 +388,7 @@ impl Loader for GGMLLoader {
                 sliding_window: None,
                 cache_config: None,
                 cache_engine: None,
-                prompt_batchsize: self.config.prompt_batchsize,
+                prompt_chunksize: Some(NonZero::new(prompt_chunksize).unwrap()),
                 model_metadata: None,
             }),
         })))
@@ -528,8 +538,6 @@ impl Pipeline for GGMLPipeline {
             input_ids_full,
             seqlen_offsets,
             seqlen_offsets_full,
-            seqlen_offsets_kernel,
-            seqlen_offsets_kernel_full,
             context_lens,
             position_ids: _,    // NOTE(EricLBuehler): ignore, it is for phi3
             paged_attn_meta: _, // NOTE(EricLBuehler): ignore it for ggml
@@ -537,20 +545,14 @@ impl Pipeline for GGMLPipeline {
             flash_meta_full,    // NOTE(EricLBuehler): ignore it for ggml dequant into f32
         } = *inputs.downcast().expect("Downcast failed.");
         let logits = match self.model {
-            Model::Llama(ref model) => model.forward(
-                &input_ids,
-                &seqlen_offsets,
-                seqlen_offsets_kernel,
-                context_lens,
-                None,
-            )?,
+            Model::Llama(ref model) => {
+                model.forward(&input_ids, &seqlen_offsets, context_lens, None)?
+            }
             Model::XLoraLlama(ref model) => model.forward(
                 &input_ids,
                 input_ids_full.as_ref().unwrap_or(&input_ids),
                 &seqlen_offsets,
                 seqlen_offsets_full.as_ref().unwrap_or(&seqlen_offsets),
-                seqlen_offsets_kernel.clone(),
-                seqlen_offsets_kernel_full.unwrap_or(seqlen_offsets_kernel),
                 self.no_kv_cache,
                 &self.non_granular_state,
                 context_lens,

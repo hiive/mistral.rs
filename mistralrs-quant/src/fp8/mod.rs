@@ -16,7 +16,7 @@ use crate::{
     cublaslt::{maybe_init_cublas_lt_wrapper, F8MatmulOutType, CUBLASLT_HANDLE},
     utils::{
         deserialize_tensor, read_dtype, serialize_tensor, version_is_compatible, write_dtype,
-        HQFF_VERSION,
+        UQFF_VERSION,
     },
     IsqType, QuantMethod, QuantMethodConfig, QuantizedSerde, QuantizedSerdeType,
 };
@@ -42,7 +42,8 @@ impl QuantMethod for FP8Linear {
             | QuantMethodConfig::Hqq { .. }
             | QuantMethodConfig::Dummy
             | QuantMethodConfig::Unquantized(_)
-            | QuantMethodConfig::Bnb { .. } => unreachable!(),
+            | QuantMethodConfig::Bnb { .. }
+            | QuantMethodConfig::BlockwiseFP8 { .. } => unreachable!(),
             QuantMethodConfig::FP8 { lin, dtype } => {
                 let QuantizationResult {
                     qw,
@@ -188,7 +189,7 @@ impl QuantMethod for FP8Linear {
 // Serialization structure:
 //
 // -----------------------
-// HQFF version, u32, little endian
+// UQFF version, u32, little endian
 // -----------------------
 // ISQ type (3 for fp8), u8, little endian
 // -----------------------
@@ -217,7 +218,8 @@ impl QuantizedSerde for FP8Linear {
     fn serialize(&self) -> Result<Cow<[u8]>> {
         let mut buffer = Vec::new();
 
-        buffer.extend(&HQFF_VERSION.to_le_bytes());
+        // Version is always first!
+        buffer.extend(&UQFF_VERSION.to_le_bytes());
 
         // ISQ type for fp8 is 3
         buffer.push(QuantizedSerdeType::Fp8 as u8);

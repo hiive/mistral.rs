@@ -80,6 +80,7 @@ class Architecture(Enum):
     Starcoder2 = "starcoder2"
     Phi3_5MoE = "phi3.5moe"
     DeepseekV2 = "deepseekv2"
+    DeepseekV3 = "deepseekv3"
 
 @dataclass
 class VisionArchitecture(Enum):
@@ -90,6 +91,7 @@ class VisionArchitecture(Enum):
     VLlama = "vllama"
     Qwen2VL = "qwen2vl"
     Idefics3 = "idefics3"
+    MiniCpmO = "minicpmo"
 
 @dataclass
 class DiffusionArchitecture(Enum):
@@ -120,7 +122,7 @@ class TextAutoMapParams:
     These affects automatic device mapping but are not a hard limit.
     """
 
-    max_seq_len: int = 16 * 1024
+    max_seq_len: int = 4* 1024
     max_batch_size: int = 1
 
 @dataclass
@@ -130,10 +132,10 @@ class VisionAutoMapParams:
     These affects automatic device mapping but are not a hard limit.
     """
 
-    max_seq_len: int = 16 * 1024
+    max_seq_len: int = 4* 1024
     max_batch_size: int = 1
     max_num_images: int = 1
-    max_image_length: int = 2 * 1024
+    max_image_length: int = 1024
 
 class Which(Enum):
     """

@@ -1097,6 +1097,12 @@ impl Model {
             xs.dtype(),
             self.cfg.num_attn_heads,
         )?;
+        let attention_mask = attention_mask.filter(|_| {
+            metadata
+                .as_ref()
+                .map(|(_, meta)| meta.is_first_prompt_chunk)
+                .unwrap_or(true)
+        });
 
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
@@ -1181,7 +1187,6 @@ impl VisionModel for Model {
         input_ids: &Tensor,
         pixel_values: Option<Tensor>,
         seqlen_offsets: &[usize],
-        _start_offsets_kernel: Tensor,
         context_lens: Vec<(usize, usize)>,
         position_ids: Vec<usize>,
         model_specific_args: Box<dyn Any>,
