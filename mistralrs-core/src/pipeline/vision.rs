@@ -34,6 +34,7 @@ use crate::{
 use anyhow::Result;
 use candle_core::{Device, Tensor, Var};
 use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
+use indicatif::MultiProgress;
 use mistralrs_quant::{GgufMatMul, HqqLayer, IsqType, QuantizedSerdeType};
 use rand_isaac::Isaac64Rng;
 use regex_automata::meta::Regex;
@@ -68,6 +69,7 @@ pub struct VisionPipeline {
     config: String,
     processor_filename: Option<PathBuf>,
     preprocessor_filename: Option<PathBuf>,
+    imatrix: Option<PathBuf>,
 }
 
 /// A loader for a vision (non-quantized) model.
@@ -104,6 +106,7 @@ pub struct VisionSpecificConfig {
     pub write_uqff: Option<PathBuf>,
     pub from_uqff: Option<PathBuf>,
     pub max_edge: Option<u32>,
+    pub imatrix: Option<PathBuf>,
     pub calibration_file: Option<PathBuf>,
 }
 
@@ -342,6 +345,12 @@ impl Loader for VisionLoader {
                 .any(|layer| layer.as_ref().is_some_and(|layer| layer.isq.is_some()));
         }
 
+        if self.config.imatrix.is_some() && self.config.calibration_file.is_some() {
+            anyhow::bail!(
+                "`imatrix` and `calibration_file` were both specified, this is not allowed."
+            );
+        }
+
         // Load onto the regular device if not using isq or if the calibration file is specified
         let load_device = if !loading_isq || self.config.calibration_file.is_some() {
             loading_isq = false;
@@ -356,6 +365,7 @@ impl Loader for VisionLoader {
             AttentionImplementation::Eager
         };
 
+        let multi_progress = Arc::new(MultiProgress::new());
         let mut model = match self.kind {
             ModelKind::Normal => vision_normal_model_loader!(
                 paths,
@@ -370,7 +380,8 @@ impl Loader for VisionLoader {
                 loading_isq,
                 self.config.from_uqff.is_some(),
                 device.clone(),
-                attention_mechanism
+                attention_mechanism,
+                multi_progress,
             ),
             _ => unreachable!(),
         };
@@ -488,11 +499,15 @@ impl Loader for VisionLoader {
         if (in_situ_quant.is_some() || self.config.topology.is_some())
             && self.config.from_uqff.is_none()
         {
-            let imatrix_source = self
-                .config
-                .calibration_file
-                .as_ref()
-                .map(|_| ImatrixDataSource::Collected);
+            let imatrix_source = match (
+                self.config.imatrix.as_ref(),
+                self.config.calibration_file.is_some(),
+            ) {
+                (None, false) => None,
+                (Some(file), false) => Some(ImatrixDataSource::File(file)),
+                (None, true) => Some(ImatrixDataSource::Collected),
+                (Some(_), true) => unreachable!(),
+            };
             model.quantize(
                 in_situ_quant,
                 device.clone(),
@@ -509,6 +524,7 @@ impl Loader for VisionLoader {
                     processor_filename: paths.get_processor_config(),
                     preprocessor_filename: paths.get_preprocessor_config(),
                 },
+                Arc::new(MultiProgress::new()),
             )?;
         } else if let Some(from_uqff) = &*self.from_uqff.read().unwrap() {
             model.load_from_artifacts(
@@ -567,7 +583,7 @@ impl Loader for VisionLoader {
                 activation_dtype: dtype,
                 sliding_window,
                 cache_config,
-                cache_engine,
+                cache_engines: cache_engine.map(|x| vec![x]),
                 prompt_chunksize: self.config.prompt_chunksize,
                 model_metadata: Some(model_metadata),
             }),
@@ -582,6 +598,7 @@ impl Loader for VisionLoader {
             processor_filename: paths.get_processor_config().clone(),
             preprocessor_filename: paths.get_preprocessor_config().clone(),
             mapper: pipeline_mapper,
+            imatrix: self.config.imatrix.clone(),
         })))
     }
 
@@ -615,7 +632,7 @@ impl IsqPipelineMixin for VisionPipeline {
                 device,
                 self.topology.as_ref(),
                 self.silent,
-                None,
+                self.imatrix.as_ref().map(ImatrixDataSource::File),
                 IsqOrganization::Default,
                 None,
                 UqffFullSer {
@@ -626,6 +643,7 @@ impl IsqPipelineMixin for VisionPipeline {
                     processor_filename: &self.processor_filename,
                     preprocessor_filename: &self.preprocessor_filename,
                 },
+                Arc::new(MultiProgress::new()),
             )
             .map_err(anyhow::Error::msg)
     }
@@ -711,14 +729,20 @@ impl Pipeline for VisionPipeline {
             position_ids,
             pixel_values,
             model_specific_args,
-            mut paged_attn_meta,
+            paged_attn_meta,
             flash_meta,
         } = *inputs.downcast::<ModelInputs>().expect("Downcast failed.");
-        let paged_attn_meta = match (
-            self.get_metadata().cache_engine.as_ref(),
-            &mut paged_attn_meta,
-        ) {
-            (Some(engine), Some(meta)) => Some((engine.get_kv_cache().clone(), meta)),
+        let metadata = self.get_metadata();
+        assert_eq!(
+            metadata
+                .cache_engines
+                .as_ref()
+                .map(|x| x.len())
+                .unwrap_or(1),
+            1
+        );
+        let paged_attn_meta = match (&metadata.cache_engines, &paged_attn_meta) {
+            (Some(engine), Some(meta)) => Some((engine[0].get_kv_cache().clone(), meta)),
             (Some(_), None) => {
                 // This can happen if Rust-side user code is wrong
                 candle_core::bail!("Forward step expected a PagedAttention input metadata. This was not provided, please ensure that the scheduler config is correctly configured for PagedAttention.")

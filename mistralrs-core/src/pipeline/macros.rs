@@ -391,7 +391,8 @@ macro_rules! normal_model_loader {
         $loading_uqff:expr,
         $real_device:expr,
         $attention_mechanism:expr,
-        $is_moqe:expr
+        $is_moqe:expr,
+        $multi_progress:expr,
     ) => {{
         let regexes = if $loading_isq && $loading_uqff {
             // Dummy weights for the layers which will be overwritten...
@@ -426,6 +427,36 @@ macro_rules! normal_model_loader {
                 mapper: $mapper,
                 loading_isq: $loading_isq,
                 real_device: $real_device,
+                multi_progress: $multi_progress,
+            },
+            $attention_mechanism,
+        )?
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! normal_model_loader_sharded {
+    (
+        $vb:expr,
+        $config:expr,
+        $loader:expr,
+        $use_flash_attn:expr,
+        $mapper:expr,
+        $loading_isq:expr,
+        $real_device:expr,
+        $attention_mechanism:expr,
+        $multi_progress:expr,
+    ) => {{
+        $loader.load(
+            &$config,
+            $use_flash_attn,
+            $vb,
+            $crate::pipeline::NormalLoadingMetadata {
+                mapper: $mapper,
+                loading_isq: $loading_isq,
+                real_device: $real_device,
+                multi_progress: $multi_progress,
             },
             $attention_mechanism,
         )?
@@ -448,7 +479,8 @@ macro_rules! vision_normal_model_loader {
         $loading_isq:expr,
         $loading_uqff:expr,
         $real_device:expr,
-        $attention_mechanism:expr
+        $attention_mechanism:expr,
+        $multi_progress:expr,
     ) => {{
         let regexes = if $loading_isq && $loading_uqff {
             // Dummy weights for the layers which will be overwritten...
@@ -479,6 +511,7 @@ macro_rules! vision_normal_model_loader {
                 mapper: $mapper,
                 loading_isq: $loading_isq,
                 real_device: $real_device,
+                multi_progress: $multi_progress,
             },
             $attention_mechanism,
         )?
@@ -499,7 +532,8 @@ macro_rules! xlora_model_loader {
         $silent:expr,
         $mapper:expr,
         $loading_isq:expr,
-        $real_device:expr
+        $real_device:expr,
+        $multi_progress:expr,
     ) => {{
         let mut safetensors_paths = $paths.get_weight_filenames().iter().collect::<Vec<_>>();
         safetensors_paths.push($paths.get_classifier_path().as_ref().unwrap());
@@ -538,6 +572,7 @@ macro_rules! xlora_model_loader {
                 mapper: $mapper,
                 loading_isq: $loading_isq,
                 real_device: $real_device,
+                multi_progress: $multi_progress,
             },
             &None,
         )?
@@ -558,7 +593,8 @@ macro_rules! lora_model_loader {
         $silent:expr,
         $mapper:expr,
         $loading_isq:expr,
-        $real_device:expr
+        $real_device:expr,
+        $multi_progress:expr,
     ) => {{
         let safetensors_paths = $paths.get_weight_filenames().iter().collect::<Vec<_>>();
         let get_device_for_tensor =
@@ -596,6 +632,7 @@ macro_rules! lora_model_loader {
                 mapper: $mapper,
                 loading_isq: $loading_isq,
                 real_device: $real_device,
+                multi_progress: $multi_progress,
             },
             &$crate::utils::varbuilder_utils::load_preload_adapters(
                 $paths.get_lora_preload_adapter_info(),
